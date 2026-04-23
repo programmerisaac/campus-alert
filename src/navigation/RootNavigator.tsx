@@ -18,7 +18,6 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import React, { useEffect } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 
-import { restoreServerUrl } from "@core/api/apiClient";
 import { LoginScreen } from "@features/auth/screens/LoginScreen";
 import { useAuthStore } from "@store/authStore";
 import { AdminNavigator } from "./AdminNavigator";
@@ -34,7 +33,6 @@ export const RootNavigator: React.FC = () => {
   // Restore server URL and try to re-authenticate on app launch
   useEffect(() => {
     const init = async () => {
-      await restoreServerUrl();
       await restoreSession();
     };
     init();

@@ -1,10 +1,13 @@
 // src/models/User.ts
 /**
  * TypeScript interfaces for all user-related data objects.
- * These mirror the Django User model fields returned by /api/v1/accounts/me/
+ * Mirrors the Django User model fields returned by /api/v1/accounts/me/
+ *
+ * Changes:
+ * - LoginPayload now uses email instead of username
+ * - Added EmailLoginPayload as the primary login type
  */
 
-/** Roles that control which UI the user sees after login. */
 export type UserRole = "admin" | "student" | "staff";
 
 /**
@@ -12,16 +15,17 @@ export type UserRole = "admin" | "student" | "staff";
  * and embedded in login / register responses.
  */
 export interface User {
-  id: string; // UUID7 string
+  id: string;
   username: string;
   email: string;
   first_name: string;
   last_name: string;
+  display_name: string;
   role: UserRole;
-  cu_id: string; // Covenant University matric / staff ID
+  cu_id: string;
   department: string;
   is_verified: boolean;
-  created_at: string; // ISO 8601
+  created_at: string;
 }
 
 /** JWT token pair stored securely after login / register. */
@@ -37,9 +41,12 @@ export interface AuthResponse {
   user: User;
 }
 
-/** Payload shape sent to POST /api/v1/accounts/login/ */
+/**
+ * Login payload — uses EMAIL not username.
+ * Matches POST /api/v1/accounts/login/ expected body.
+ */
 export interface LoginPayload {
-  username: string;
+  email: string; // Changed from username
   password: string;
 }
 
@@ -48,6 +55,7 @@ export interface RegisterPayload {
   username: string;
   email: string;
   password: string;
+  password_confirm: string;
   first_name: string;
   last_name: string;
   role?: UserRole;

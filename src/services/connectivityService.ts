@@ -1,142 +1,140 @@
 // src/services/connectivityService.ts
 /**
- * Connectivity Service
+ * Connectivity service — monitors network state and notifies subscribers.
  *
- * Monitors network state changes and automatically switches the Axios
- * base URL between the internet-facing server and the campus LAN server.
+ * Three possible states:
+ *   "internet"  — device has a working internet connection (FCM is active)
+ *   "lanOnly"   — device is on Wi-Fi but internet is unreachable (use WebSocket)
+ *   "offline"   — no usable network (read from SQLite cache only)
  *
- * ── Why This Exists ───────────────────────────────────────────────────────────
- * Students on campus may lose internet access but still be on the campus
- * Wi-Fi network. In that case, the Django server is reachable via LAN IP
- * even though internet.isReachable returns false.
- *
- * This service detects that scenario and switches the API client to the
- * LAN URL automatically — no user action needed.
- *
- * ── Usage ─────────────────────────────────────────────────────────────────────
- * // In App.tsx startup effect:
- * connectivityService.start();
- *
- * // In App.tsx cleanup:
- * return () => connectivityService.stop();
- *
- * ── Singleton Pattern ─────────────────────────────────────────────────────────
- * Only one NetInfo listener exists at a time.
- * Calling start() again safely removes the previous listener first.
+ * Usage:
+ *   connectivityService.start();                          // in App.tsx useEffect
+ *   const unsub = connectivityService.subscribe(handler); // in alertRepository
+ *   connectivityService.state;                            // read current state
+ *   connectivityService.stop();                           // on app teardown
  */
 
-import { apiClient } from "@core/api/apiClient";
 import NetInfo, { type NetInfoState } from "@react-native-community/netinfo";
 
-// ── Private module state ──────────────────────────────────────────────────────
+// ─── Types ─────────────────────────────────────────────────────────────────────
 
-/**
- * Holds the NetInfo unsubscribe function.
- * Set by start(), cleared by stop().
- * Checked by start() to prevent duplicate listeners.
- */
-let unsubscribe: (() => void) | null = null;
+export type ConnectivityState = "internet" | "lanOnly" | "offline";
 
-// ── Internal handler ──────────────────────────────────────────────────────────
+type ConnectivitySubscriber = (state: ConnectivityState) => void;
 
-/**
- * Processes a network state change from NetInfo.
- *
- * Decision logic:
- *  - Not connected at all → log only, do not change baseURL
- *    (requests will fail with network error, which the UI handles)
- *  - Connected + internet reachable → use API_BASE_URL (internet server)
- *  - Connected + internet NOT reachable → use LAN_BASE_URL (campus server)
- *
- * @param state - NetInfo network state object
- */
-function handleConnectivityChange(state: NetInfoState): void {
-  const isConnected = state.isConnected ?? false;
-  const isInternetReachable = state.isInternetReachable ?? false;
+// ─── Service implementation ────────────────────────────────────────────────────
 
-  if (!isConnected) {
-    console.info(
-      "[Connectivity] Device is offline — no URL switch performed. " +
-        "API calls will fail until connectivity is restored.",
-    );
-    return;
+class ConnectivityService {
+  /**
+   * The current network state.
+   * Starts as "offline" until the first NetInfo event is received.
+   * Exposed as a public property so alertRepository can read it synchronously
+   * inside fetchAlertFeed without waiting for a subscriber callback.
+   */
+  public state: ConnectivityState = "offline";
+
+  /** Registered change listeners. Keyed by auto-incremented id for O(1) removal. */
+  private _subscribers: Map<number, ConnectivitySubscriber> = new Map();
+  private _nextId = 0;
+
+  /** Unsubscribe function returned by NetInfo.addEventListener. */
+  private _netInfoUnsub: (() => void) | null = null;
+
+  // ─── Lifecycle ────────────────────────────────────────────────────────────
+
+  /**
+   * Begins monitoring network state.
+   * Safe to call multiple times — subsequent calls are no-ops.
+   * Called once from App.tsx useEffect on startup.
+   */
+  start(): void {
+    if (this._netInfoUnsub) return; // Already started
+
+    this._netInfoUnsub = NetInfo.addEventListener((netState: NetInfoState) => {
+      const resolved = this._resolveState(netState);
+      if (resolved !== this.state) {
+        this.state = resolved;
+        this._notifyAll(resolved);
+      }
+    });
+
+    // Eagerly fetch the current state so `this.state` is accurate immediately
+    // rather than waiting for the first change event.
+    NetInfo.fetch().then((netState) => {
+      const resolved = this._resolveState(netState);
+      this.state = resolved;
+      // Do NOT notify subscribers here — they haven't been registered yet
+      // and this is the initial read, not a change.
+    });
   }
 
-  if (isInternetReachable) {
-    // Full internet access — use the cloud server
-    const internetUrl = process.env.API_BASE_URL;
+  /**
+   * Stops monitoring and removes all subscribers.
+   * Called from App.tsx cleanup on unmount.
+   */
+  stop(): void {
+    this._netInfoUnsub?.();
+    this._netInfoUnsub = null;
+    this._subscribers.clear();
+  }
 
-    if (!internetUrl) {
-      console.warn(
-        "[Connectivity] API_BASE_URL is not set in .env — " +
-          "cannot switch to internet URL.",
-      );
-      return;
+  // ─── Subscription ─────────────────────────────────────────────────────────
+
+  /**
+   * Registers a listener that is called every time the connectivity state changes.
+   * The listener is NOT called immediately with the current state — use
+   * `connectivityService.state` to read the current value synchronously.
+   *
+   * @param callback - Function called with the new ConnectivityState on every change
+   * @returns Unsubscribe function — call it to stop receiving updates (e.g., on unmount)
+   */
+  subscribe(callback: ConnectivitySubscriber): () => void {
+    const id = this._nextId++;
+    this._subscribers.set(id, callback);
+
+    return () => {
+      this._subscribers.delete(id);
+    };
+  }
+
+  // ─── Private ──────────────────────────────────────────────────────────────
+
+  /**
+   * Maps a raw NetInfo state to our three-tier ConnectivityState.
+   *
+   * Logic:
+   *  - Not connected at all → "offline"
+   *  - Connected AND internet is reachable → "internet"
+   *  - Connected BUT internet is NOT reachable (campus LAN only) → "lanOnly"
+   *
+   * `isInternetReachable` can be null when NetInfo hasn't checked yet;
+   * we treat null as reachable to avoid false "lanOnly" flashes on startup.
+   */
+  private _resolveState(netState: NetInfoState): ConnectivityState {
+    if (!netState.isConnected) {
+      return "offline";
     }
 
-    // Only update if the URL actually changed (avoids redundant Axios updates)
-    if (apiClient.defaults.baseURL !== internetUrl) {
-      apiClient.defaults.baseURL = internetUrl;
-      console.info(
-        `[Connectivity] Internet reachable — switched to: ${internetUrl}`,
-      );
-    }
-  } else {
-    // On network but no internet — try campus LAN server
-    const lanUrl = process.env.LAN_BASE_URL;
-
-    if (!lanUrl) {
-      console.warn(
-        "[Connectivity] LAN_BASE_URL is not set in .env — " +
-          "cannot switch to LAN URL. Set LAN_BASE_URL in your .env file.",
-      );
-      return;
+    // null means "unknown" — assume internet until proven otherwise
+    if (netState.isInternetReachable === false) {
+      return "lanOnly";
     }
 
-    if (apiClient.defaults.baseURL !== lanUrl) {
-      apiClient.defaults.baseURL = lanUrl;
-      console.info(
-        `[Connectivity] Internet unreachable — switched to LAN: ${lanUrl}`,
-      );
-    }
+    return "internet";
+  }
+
+  /** Calls all registered subscribers with the new state. */
+  private _notifyAll(state: ConnectivityState): void {
+    this._subscribers.forEach((callback) => {
+      try {
+        callback(state);
+      } catch (err) {
+        // Subscriber errors must not crash the service
+        console.warn("[ConnectivityService] Subscriber threw:", err);
+      }
+    });
   }
 }
 
-// ── Public service object ─────────────────────────────────────────────────────
-
-export const connectivityService = {
-  /**
-   * Starts monitoring network connectivity.
-   *
-   * Registers a NetInfo listener that fires immediately with the current
-   * state, then fires again on every subsequent change.
-   *
-   * Safe to call multiple times — any existing listener is removed first.
-   *
-   * Call this in App.tsx inside the startup useEffect.
-   */
-  start(): void {
-    // Remove existing listener before adding a new one
-    // Prevents duplicate listeners if start() is called more than once
-    if (unsubscribe) {
-      unsubscribe();
-      console.info("[Connectivity] Removed existing listener before restart.");
-    }
-
-    unsubscribe = NetInfo.addEventListener(handleConnectivityChange);
-    console.info("[Connectivity] Service started — monitoring network state.");
-  },
-
-  /**
-   * Stops monitoring network connectivity and releases the listener.
-   *
-   * Call this in the cleanup function returned from the App.tsx useEffect.
-   */
-  stop(): void {
-    if (unsubscribe) {
-      unsubscribe();
-      unsubscribe = null;
-      console.info("[Connectivity] Service stopped.");
-    }
-  },
-};
+/** Singleton — import and use directly throughout the app. */
+export const connectivityService = new ConnectivityService();
