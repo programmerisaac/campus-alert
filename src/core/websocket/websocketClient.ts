@@ -2,195 +2,164 @@
 /**
  * LAN WebSocket client for real-time campus alert delivery.
  *
- * ── What is a WebSocket? (Simple explanation) ─────────────────────────────────
- * Normal HTTP: Phone asks → Server answers → Connection closes. Repeat for each message.
- * WebSocket:   Phone connects → CONNECTION STAYS OPEN → Server can push messages
- *              to the phone AT ANY TIME without the phone asking first.
+ * ── Architecture overview ─────────────────────────────────────────────────────
  *
- * This is perfect for alerts: when an admin sends an alert, Django immediately
- * pushes it to every connected phone over the open WebSocket connection.
- * The phone doesn't have to keep polling "are there new alerts?" every few seconds.
+ *   [Admin sends alert]
+ *         ↓
+ *   [Django saves to DB → Celery task → publishes to Redis pub/sub]
+ *         ↓
+ *   [Django ASGI consumer receives Redis message]
+ *         ↓
+ *   [Consumer pushes { type: "new_alert", alert: {...} } to all connected phones]
+ *         ↓
+ *   [This client's onmessage fires → onAlert callback → UI updates]
  *
- * ── Architecture in CampusAlert ───────────────────────────────────────────────
+ * ── Connection URL ────────────────────────────────────────────────────────────
+ * The base URL comes from EXPO_PUBLIC_WS_BASE_URL in .env:
+ *   ws://10.89.126.143:8000
  *
- *   [Admin composes alert]
- *         ↓
- *   [Django saves alert to DB]
- *         ↓
- *   [Celery task publishes to Redis pub/sub channel "alerts"]
- *         ↓
- *   [Django ASGI consumer subscribes to Redis, receives message]
- *         ↓
- *   [Consumer pushes alert JSON to ALL connected WebSocket clients]
- *         ↓
- *   [This file's _handleMessage() receives it on the phone]
- *         ↓
- *   [onAlert callback is called → alert appears in the feed]
+ * The client appends the path and JWT token:
+ *   ws://10.89.126.143:8000/ws/alerts/?token=<jwt>
  *
- * ── Connection URL format ─────────────────────────────────────────────────────
- * ws://10.89.126.143:8000/ws/alerts/?token=<jwt_access_token>
+ * ── Why env var, not a passed parameter? ─────────────────────────────────────
+ * Previously connect() accepted a `serverIp` string from the caller.
+ * This caused a bug where a stale IP (e.g. from a previous Wi-Fi network)
+ * was passed in, leading to connection failures like:
+ *   "failed to connect to /192.168.1.100 (port 8000)"
  *
- * Why JWT in the query string?
- * The WebSocket handshake is an HTTP Upgrade request. You CAN send headers
- * during the initial handshake, but the browser WebSocket API (which React Native
- * also uses) doesn't let you set custom headers like "Authorization: Bearer ...".
- * So Django reads the token from ?token= in the URL query string instead.
+ * The server address is a compile-time configuration value, not runtime data.
+ * Reading it from the env var here makes the URL single-sourced and
+ * eliminates an entire class of "wrong IP" bugs.
  *
  * ── Reconnection strategy ─────────────────────────────────────────────────────
- * WiFi drops are common on campus. We automatically reconnect with
- * "exponential backoff":
- *   - First retry: wait 1 second
- *   - Second retry: wait 2 seconds
- *   - Third retry: wait 4 seconds
- *   - ... doubles each time, up to 30 seconds maximum
- *
- * This prevents hammering the server with constant reconnect attempts
- * during a prolonged outage.
- *
- * ── Usage ─────────────────────────────────────────────────────────────────────
- *   // Start listening (called after login):
- *   await wsClient.connect('10.89.126.143:8000', (alert) => {
- *     console.log('New alert received!', alert);
- *   });
- *
- *   // Stop listening (called on logout):
- *   wsClient.disconnect();
- *
- *   // Check if connected:
- *   if (wsClient.isConnected) { ... }
+ * Exponential backoff: 1s → 2s → 4s → 8s → ... capped at 30s.
+ * Prevents hammering the server during an outage.
  */
 
-// ── Fix for error: "Module '@core/api/apiClient' has no exported member 'SECURE_KEYS'" ──
-// The old apiClient.ts kept SecureStore keys as private constants.
-// They are now exported as the SECURE_KEYS object so this file can import them.
-// This avoids duplicating the key string literals ("auth_access_token" etc.)
-// in multiple files, which would cause silent bugs if they ever drifted apart.
 import { SECURE_KEYS } from "@core/api/apiClient";
 import type { Alert } from "@models/Alert";
 import * as SecureStore from "expo-secure-store";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Server address — read from env var at module load time
+//
+// EXPO_PUBLIC_WS_BASE_URL should be the scheme + host + port ONLY.
+// Example: "ws://10.89.126.143:8000"
+// The path "/ws/alerts/" and "?token=..." are appended below.
+//
+// We strip trailing slashes so the concatenation is always clean:
+//   "ws://10.89.126.143:8000" + "/ws/alerts/?token=..."  ✅
+//   "ws://10.89.126.143:8000/" + "/ws/alerts/?token=..." → double slash ❌
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RAW_WS_BASE = process.env.EXPO_PUBLIC_WS_BASE_URL ?? "ws://10.0.2.2:8000"; // Android emulator fallback
+
+/**
+ * Normalised WebSocket base URL — trailing slashes removed.
+ * Example: "ws://10.89.126.143:8000"
+ */
+const WS_BASE_URL = RAW_WS_BASE.trim().replace(/\/+$/, "");
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * The delay doubles on each failed reconnect attempt, up to this ceiling.
- * 30 seconds prevents excessive reconnect attempts during long outages.
- */
-const MAX_RECONNECT_DELAY_MS = 30_000; // 30 seconds
-
-/**
- * How long to wait before the FIRST reconnect attempt after a disconnect.
- * 1 second is fast enough to feel responsive but not aggressive.
- */
+/** Starting delay for reconnection attempts. Doubles on each failure. */
 const INITIAL_RECONNECT_DELAY_MS = 1_000; // 1 second
+
+/** Maximum reconnection delay — caps the exponential backoff. */
+const MAX_RECONNECT_DELAY_MS = 30_000; // 30 seconds
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Function signature for the alert notification callback.
  * Called each time a new_alert message arrives from Django.
- *
- * @param alert - The full Alert object as serialised by Django's AlertSerializer
+ * The caller (typically alertStore) updates the feed UI with the alert.
  */
 type AlertCallback = (alert: Alert) => void;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WebSocketClient class
+// WebSocketClient
 // ─────────────────────────────────────────────────────────────────────────────
 
 class WebSocketClient {
-  /** The active WebSocket connection, or null when disconnected. */
+  /** The active WebSocket connection, or null when not connected. */
   private socket: WebSocket | null = null;
 
   /**
-   * Current reconnect delay in milliseconds.
+   * Current reconnect delay in ms.
    * Starts at INITIAL_RECONNECT_DELAY_MS, doubles on each failure,
-   * resets to initial value on successful connection.
+   * resets to initial on successful connection.
    */
   private reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
 
   /**
-   * Handle for the pending reconnect setTimeout.
-   * Stored so we can cancel it if disconnect() is called while waiting.
+   * Handle for the pending reconnect timer.
+   * Stored so disconnect() can cancel a scheduled reconnect immediately.
    */
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
-   * When true, reconnection is suppressed.
-   * Set to true by disconnect() (explicit logout/stop).
-   * Set to false by connect() (user logs in).
+   * When true, automatic reconnection is suppressed.
+   * Set true by disconnect() (intentional stop).
+   * Set false by connect() (intentional start).
    */
   private intentionalDisconnect = false;
 
-  /**
-   * The function to call when a new alert arrives from Django.
-   * Set by connect(), cleared by disconnect().
-   */
+  /** Callback invoked when a new_alert message arrives from Django. */
   private onAlertCallback: AlertCallback | null = null;
-
-  /**
-   * The server address (host:port) for the WebSocket URL.
-   * Example: "10.89.126.143:8000"
-   * Stored so _openSocket() can rebuild the URL on reconnects.
-   */
-  private serverIp: string = "";
 
   // ─── Public API ─────────────────────────────────────────────────────────────
 
   /**
-   * Opens a WebSocket connection to Django's LAN alert consumer.
+   * Opens a WebSocket connection to Django's ASGI alert consumer.
    *
-   * This reads the JWT access token from SecureStore and appends it
-   * to the WebSocket URL as a query parameter.
+   * The server address is read from EXPO_PUBLIC_WS_BASE_URL at module load
+   * time — there is no `serverIp` parameter. This prevents stale or incorrect
+   * IPs from being passed in by the caller.
    *
-   * Safe to call multiple times — calling connect() while already connected
-   * will close the old connection and open a new one.
+   * Safe to call while already connected — the old socket is closed cleanly
+   * and a new one is opened.
    *
-   * @param serverIp - Host and port of the Django server, e.g. "10.89.126.143:8000"
-   *                   Do NOT include ws:// or any path — this method adds those.
-   * @param onAlert  - Callback invoked every time an alert message arrives from Django
+   * @param onAlert - Called every time a new alert is pushed from Django
    *
    * @example
-   * await wsClient.connect('10.89.126.143:8000', (alert) => {
+   * // After login:
+   * await wsClient.connect((alert) => {
    *   useAlertStore.getState().prependAlert(alert);
    * });
+   *
+   * // On logout:
+   * wsClient.disconnect();
    */
-  async connect(serverIp: string, onAlert: AlertCallback): Promise<void> {
-    // Store these so _openSocket() and _scheduleReconnect() can use them
-    this.serverIp = serverIp;
+  async connect(onAlert: AlertCallback): Promise<void> {
     this.onAlertCallback = onAlert;
-
-    // Allow reconnection (in case connect() is called after a disconnect())
     this.intentionalDisconnect = false;
 
-    // Open the actual WebSocket connection
+    // Close any existing socket before opening a new one
+    if (this.socket) {
+      this.socket.close();
+      this.socket = null;
+    }
+
     await this._openSocket();
   }
 
   /**
-   * Permanently closes the WebSocket connection.
-   *
-   * After calling disconnect():
-   * - No more alert callbacks will fire
-   * - No reconnection attempts will be made
-   * - The connection is closed cleanly (WebSocket close code 1000)
-   *
+   * Permanently closes the connection and suppresses all reconnection attempts.
    * Call this on user logout or app teardown.
    */
   disconnect(): void {
-    // Signal that this disconnect is intentional (suppress reconnection)
     this.intentionalDisconnect = true;
 
     // Cancel any pending reconnect timer
-    if (this.reconnectTimer) {
+    if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
 
-    // Close the socket if it exists
     if (this.socket) {
       this.socket.close();
       this.socket = null;
@@ -200,15 +169,10 @@ class WebSocketClient {
   }
 
   /**
-   * True if the WebSocket connection is currently open and ready.
+   * True if the WebSocket is currently open and ready to receive messages.
    *
-   * WebSocket readyState values:
-   *   0 = CONNECTING — handshake in progress
-   *   1 = OPEN       — connected and ready
-   *   2 = CLOSING    — close handshake in progress
-   *   3 = CLOSED     — connection closed
-   *
-   * We only return true for state 1 (OPEN).
+   * WebSocket readyState:
+   *   0 = CONNECTING, 1 = OPEN, 2 = CLOSING, 3 = CLOSED
    */
   get isConnected(): boolean {
     return this.socket?.readyState === WebSocket.OPEN;
@@ -217,85 +181,76 @@ class WebSocketClient {
   // ─── Private methods ────────────────────────────────────────────────────────
 
   /**
-   * Creates and opens the WebSocket connection to Django.
+   * Builds the WebSocket URL, reads the JWT from SecureStore, and
+   * opens the connection with all four event handlers attached.
    *
-   * Steps:
-   * 1. Read JWT access token from SecureStore
-   * 2. Build the WebSocket URL with the token as a query parameter
-   * 3. Create the WebSocket and attach event handlers
-   *
-   * Called by connect() initially, then by _scheduleReconnect() on each retry.
+   * Called by connect() initially and by _scheduleReconnect() on each retry.
    */
   private async _openSocket(): Promise<void> {
-    // ── Read JWT token ────────────────────────────────────────────────────────
-    // Django's WebSocket consumer validates this token to identify the user.
-    // We use the same SecureStore key as authStore uses to store the token.
+    // ── Read JWT access token ────────────────────────────────────────────────
+    // Django's consumer validates this to authenticate the phone.
+    // We use the same key as authStore so we're always reading the current token.
     const token = await SecureStore.getItemAsync(SECURE_KEYS.ACCESS_TOKEN);
 
     if (!token) {
-      // No token means the user isn't logged in. Don't try to connect.
-      // This can happen if connect() is called before login completes.
+      // User is not logged in yet — don't attempt to connect.
+      // connect() will be called again after login succeeds.
       console.warn(
-        "[WebSocketClient] No access token found in SecureStore. " +
-          "Cannot connect — user may not be logged in.",
+        "[WebSocketClient] No access token in SecureStore. " +
+          "WebSocket connection deferred until after login.",
       );
       return;
     }
 
-    // ── Build WebSocket URL ────────────────────────────────────────────────────
+    // ── Build connection URL ─────────────────────────────────────────────────
     // Format: ws://10.89.126.143:8000/ws/alerts/?token=eyJhbG...
     //
-    // Django's consumer reads: scope['query_string'] → parses ?token=...
-    // This matches the route in asgi.py: '/ws/alerts/'
+    // The JWT goes in the query string because the browser/React Native
+    // WebSocket API does not support custom headers during the HTTP Upgrade
+    // handshake. Django reads it from scope['query_string'].
     //
-    // We use ws:// (not wss://) because we're on a local LAN without SSL.
-    // In production with SSL, change this to wss://.
-    const url = `ws://${this.serverIp}/ws/alerts/?token=${token}`;
+    // WS_BASE_URL is fixed at module load from EXPO_PUBLIC_WS_BASE_URL.
+    // It never changes at runtime — no stale IPs, no caller-supplied values.
+    const url = `${WS_BASE_URL}/ws/alerts/?token=${token}`;
 
-    console.info(
-      `[WebSocketClient] Connecting to: ws://${this.serverIp}/ws/alerts/`,
-    );
+    console.info(`[WebSocketClient] Connecting to: ${WS_BASE_URL}/ws/alerts/`);
 
-    // ── Create WebSocket ──────────────────────────────────────────────────────
+    // ── Create socket ────────────────────────────────────────────────────────
     this.socket = new WebSocket(url);
 
-    // ── Event: connection opened ──────────────────────────────────────────────
+    // ── onopen: connection established ────────────────────────────────────────
     this.socket.onopen = () => {
-      console.info("[WebSocketClient] LAN connection established.");
-      // Reset backoff delay so the NEXT disconnect starts with a 1s retry
+      console.info("[WebSocketClient] Connection established successfully.");
+      // Reset backoff so the NEXT disconnect starts with a 1s retry delay
       this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
     };
 
-    // ── Event: message received from Django ───────────────────────────────────
+    // ── onmessage: data received from Django ─────────────────────────────────
     this.socket.onmessage = (event) => {
-      // event.data is a string — parse it and route to the correct handler
       this._handleMessage(event.data as string);
     };
 
-    // ── Event: connection error ───────────────────────────────────────────────
-    // This fires when the connection attempt fails (e.g., server unreachable)
-    // or when an established connection encounters an error.
-    // onclose always fires after onerror, so reconnection is handled there.
-    this.socket.onerror = (event) => {
+    // ── onerror: connection error ─────────────────────────────────────────────
+    // This fires when the TCP connection fails (server unreachable, timeout, etc.)
+    // onclose always fires immediately after onerror, so reconnection is handled
+    // in onclose — we just log here.
+    this.socket.onerror = () => {
       console.warn(
-        "[WebSocketClient] Socket error. Will attempt to reconnect.",
-        event,
+        `[WebSocketClient] Connection error on ${WS_BASE_URL}. ` +
+          "Will retry via onclose handler.",
       );
     };
 
-    // ── Event: connection closed ──────────────────────────────────────────────
-    // Fires when the connection drops for any reason:
-    // - WiFi lost
-    // - Server restarted
-    // - Django closed the connection (e.g., invalid token)
-    // - We called socket.close() via disconnect()
+    // ── onclose: connection dropped ───────────────────────────────────────────
+    // Fires for ALL closes: network drop, server restart, invalid token,
+    // or our own disconnect() call.
     this.socket.onclose = (event) => {
+      // Only reconnect if the close was NOT triggered by our disconnect() call
       if (!this.intentionalDisconnect) {
-        // Unexpected close — schedule a reconnect with backoff
         console.info(
-          `[WebSocketClient] Connection closed (code: ${event.code}, ` +
-            `reason: "${event.reason || "none"}"). ` +
-            `Retrying in ${this.reconnectDelay / 1000}s...`,
+          `[WebSocketClient] Connection closed unexpectedly ` +
+            `(code: ${event.code}, reason: "${event.reason || "none"}"). ` +
+            `Retrying in ${this.reconnectDelay / 1_000}s...`,
         );
         this._scheduleReconnect();
       }
@@ -303,66 +258,56 @@ class WebSocketClient {
   }
 
   /**
-   * Parses a raw WebSocket message string and routes it to the correct handler.
+   * Parses a raw JSON string from Django and routes to the correct handler.
    *
-   * Django sends JSON messages with a "type" field:
+   * Message shapes Django sends:
+   *   { "type": "new_alert", "alert": { ...Alert } }  — new alert dispatched
+   *   { "type": "heartbeat" }                          — keep-alive ping
+   *   { "type": "error",    "message": "..." }         — server-side error
    *
-   * Alert message:
-   *   { "type": "new_alert", "alert": { ...Alert object... } }
-   *
-   * Heartbeat (keep-alive ping from Django):
-   *   { "type": "heartbeat" }
-   *
-   * Error message:
-   *   { "type": "error", "message": "..." }
-   *
-   * @param raw - Raw JSON string received from the WebSocket
+   * @param raw - Raw JSON string from the WebSocket message event
    */
   private _handleMessage(raw: string): void {
-    // ── Parse JSON ────────────────────────────────────────────────────────────
     let data: Record<string, unknown>;
 
     try {
       data = JSON.parse(raw) as Record<string, unknown>;
     } catch {
-      // The server sent something that isn't valid JSON — log and ignore
       console.warn(
-        "[WebSocketClient] Received non-JSON message (ignoring):",
+        "[WebSocketClient] Received non-JSON message — ignoring:",
         raw,
       );
       return;
     }
 
-    // ── Route by message type ─────────────────────────────────────────────────
     const type = data.type as string | undefined;
 
     switch (type) {
       case "new_alert":
-        // A new alert was dispatched — notify the app
-        if (this.onAlertCallback) {
-          // Django sends the full serialised alert object under the "alert" key
-          const alert = data.alert as Alert;
-          this.onAlertCallback(alert);
+        // Django pushed a new alert — notify the caller (alertStore)
+        if (this.onAlertCallback && data.alert) {
+          this.onAlertCallback(data.alert as Alert);
         }
         break;
 
       case "heartbeat":
-        // Django sends a heartbeat every ~30 seconds to detect dead connections.
-        // We must reply with a pong so Django knows we're still alive.
-        // If Django doesn't receive a pong within its timeout, it closes the connection.
+        // Django sends a heartbeat every ~30s to detect dead connections.
+        // We reply with "pong" so Django knows we're alive.
+        // If Django doesn't receive a pong within its timeout, it closes the socket.
         this._sendPong();
         break;
 
       case "error":
-        // Django sent us an error (e.g., invalid token, permission denied)
+        // Django rejected our connection or encountered a server error.
+        // Common cause: JWT token was invalid or expired at handshake time.
         console.warn(
-          "[WebSocketClient] Received error from server:",
+          "[WebSocketClient] Server error message received:",
           data.message,
         );
         break;
 
       default:
-        // Unknown message type — log for debugging but don't crash
+        // Unknown message type — log it but don't crash
         console.warn(
           "[WebSocketClient] Unknown message type received:",
           type,
@@ -372,12 +317,10 @@ class WebSocketClient {
   }
 
   /**
-   * Sends a pong response to Django's heartbeat ping.
+   * Sends a pong reply to Django's heartbeat message.
    *
-   * Django's consumer sends { "type": "heartbeat" } periodically.
-   * We reply with { "type": "pong" } to confirm the connection is alive.
-   * If Django doesn't receive a pong within its timeout window,
-   * it will close the connection from the server side.
+   * Django expects { "type": "pong" } within its configured timeout window.
+   * If the pong doesn't arrive, Django closes the connection from its side.
    */
   private _sendPong(): void {
     if (this.socket?.readyState === WebSocket.OPEN) {
@@ -388,33 +331,26 @@ class WebSocketClient {
   /**
    * Schedules a reconnection attempt after the current backoff delay.
    *
-   * ── Exponential backoff explained ─────────────────────────────────────────
-   * When WiFi drops, we don't want every phone on campus to reconnect
-   * simultaneously and overwhelm the server. Exponential backoff spreads
-   * reconnection attempts over time:
+   * Exponential backoff prevents thundering-herd problems when many phones
+   * all try to reconnect simultaneously after a server restart:
    *
-   * Attempt 1: wait 1s  (reconnectDelay = 1000ms)
-   * Attempt 2: wait 2s  (reconnectDelay = 2000ms)
-   * Attempt 3: wait 4s  (reconnectDelay = 4000ms)
-   * Attempt 4: wait 8s  (reconnectDelay = 8000ms)
-   * ...
-   * Attempt N: wait 30s (capped at MAX_RECONNECT_DELAY_MS)
+   *   Attempt 1: wait 1s
+   *   Attempt 2: wait 2s
+   *   Attempt 3: wait 4s
+   *   Attempt 4: wait 8s
+   *   Attempt 5+: wait 30s (capped)
    *
-   * Note: the delay DOUBLING happens AFTER we try to connect, not before.
-   * So on a successful reconnect (onopen fires), reconnectDelay is reset
-   * to INITIAL_RECONNECT_DELAY_MS so the next disconnect starts fresh.
+   * On successful reconnection (onopen fires), the delay resets to 1s.
    */
   private _scheduleReconnect(): void {
     this.reconnectTimer = setTimeout(async () => {
-      // Check again — disconnect() might have been called during the wait
+      // Re-check in case disconnect() was called during the wait
       if (!this.intentionalDisconnect) {
-        // Double the delay for next time, capped at maximum
+        // Double the delay for the next attempt, capped at maximum
         this.reconnectDelay = Math.min(
           this.reconnectDelay * 2,
           MAX_RECONNECT_DELAY_MS,
         );
-
-        // Attempt to reconnect
         await this._openSocket();
       }
     }, this.reconnectDelay);
@@ -424,21 +360,21 @@ class WebSocketClient {
 // ─────────────────────────────────────────────────────────────────────────────
 // Singleton export
 //
-// We export a single instance rather than the class itself.
-// This means every file that imports wsClient gets the SAME connection object.
-// If we exported the class, different files could accidentally create
-// separate connections to Django.
+// One instance = one connection = no duplicate messages.
+// Import this directly in every file that needs WS access.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * The single WebSocket client instance for the entire app.
  *
- * Import and use this directly:
+ * Usage:
  * ```ts
  * import { wsClient } from '@core/websocket/websocketClient';
  *
- * // After login:
- * await wsClient.connect('10.89.126.143:8000', handleAlert);
+ * // After login — no IP argument needed, reads from env var automatically:
+ * await wsClient.connect((alert) => {
+ *   useAlertStore.getState().prependAlert(alert);
+ * });
  *
  * // On logout:
  * wsClient.disconnect();
