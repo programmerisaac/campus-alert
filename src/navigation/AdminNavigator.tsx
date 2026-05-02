@@ -63,7 +63,7 @@ export const AdminNavigator: React.FC = () => (
       }}
     />
     <Tabs.Screen
-      name="ComposeTab"
+      name="Compose"
       component={ComposeAlertScreen}
       options={{
         title: "Compose",
@@ -73,7 +73,7 @@ export const AdminNavigator: React.FC = () => (
       }}
     />
     <Tabs.Screen
-      name="SettingsTab"
+      name="Settings"
       component={SettingsScreen}
       options={{
         title: "Settings",

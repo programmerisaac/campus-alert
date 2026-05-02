@@ -62,35 +62,30 @@ class AlertRepository {
    * Always pair with teardown() in the cleanup return.
    */
   async initialise(): Promise<void> {
-    // Step 1: Load the first page of alerts immediately on mount.
-    // Falls back to SQLite cache if the device is offline.
     await this._loadInitialFeed();
 
-    // Step 2: Subscribe to connectivity changes.
-    // The handler fires whenever the device transitions between:
-    //   offline → lanOnly → internet  (or any combination)
+    // ── Connect WebSocket immediately for current state ──────────────────────
+    // The connectivity subscriber only fires on CHANGES. If the phone is already
+    // connected when this screen mounts, we must connect now — not wait for a
+    // state transition that may never come.
+    const currentState = connectivityService.state;
+    if (currentState === "internet" || currentState === "lanOnly") {
+      await this._connectWebSocket();
+    }
+
+    // ── Subscribe to future connectivity changes ─────────────────────────────
     this.connectivityUnsub = connectivityService.subscribe(async (state) => {
-      // ── Coming online (either LAN or full internet) ────────────────────────
-      // Fetch any alerts that arrived while the device was offline.
-      // syncMissedAlerts() calls GET /alerts/missed/?since=<last_cached_ts>
-      // and bulk-upserts results into SQLite before returning them.
       if (state === "internet" || state === "lanOnly") {
+        // Fetch missed alerts on every reconnect
         const missed = await syncMissedAlerts();
         missed.forEach((alert) => useAlertStore.getState().prependAlert(alert));
-      }
 
-      // ── Campus LAN mode (Wi-Fi without internet) ───────────────────────────
-      // FCM push notifications require internet, so we fall back to WebSocket
-      // for real-time delivery over the local campus network.
-      //
-      // wsClient.connect() takes ONE argument — the callback function.
-      // The server URL is derived from EXPO_PUBLIC_WS_BASE_URL inside
-      // websocketClient.ts — the caller does NOT pass an IP.
-      if (state === "lanOnly") {
-        await wsClient.connect(this._onWebSocketAlert.bind(this));
+        // (Re-)connect WebSocket for real-time delivery.
+        // We connect on BOTH internet and lanOnly because FCM is unavailable
+        // in Expo Go — WebSocket is the only real-time channel that works.
+        await this._connectWebSocket();
       } else {
-        // Internet mode: FCM handles push delivery — WebSocket not needed.
-        // Offline mode: no connectivity at all — disconnect cleanly.
+        // Offline — close cleanly
         wsClient.disconnect();
       }
     });
@@ -182,6 +177,24 @@ class AlertRepository {
   }
 
   // ─── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * Opens the WebSocket connection and registers the alert callback.
+   * Extracted so it can be called both at initialise() time (if already
+   * connected) and on every subsequent reconnect event.
+   *
+   * Failures are non-fatal — alerts will still arrive via the missed-alert
+   * sync the next time connectivity is restored.
+   */
+  private async _connectWebSocket(): Promise<void> {
+    try {
+      await wsClient.connect(this._onWebSocketAlert.bind(this));
+      console.info("[AlertRepository] WebSocket connected.");
+    } catch (err) {
+      // Non-fatal — alerts will still arrive via missed-alert sync on reconnect
+      console.warn("[AlertRepository] WebSocket connection failed:", err);
+    }
+  }
 
   /**
    * Loads the first page of alerts from the API and sets them in the store.

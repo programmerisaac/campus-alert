@@ -12,7 +12,10 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.onehux.campusalert",
       "infoPlist": {
-        "UIBackgroundModes": ["fetch", "remote-notification"]
+        "UIBackgroundModes": [
+          "fetch",
+          "remote-notification"
+        ]
       }
     },
     "android": {
@@ -46,7 +49,9 @@
           "imageWidth": 200,
           "resizeMode": "contain",
           "backgroundColor": "#ffffff",
-          "dark": { "backgroundColor": "#000000" }
+          "dark": {
+            "backgroundColor": "#000000"
+          }
         }
       ],
       [
@@ -54,12 +59,15 @@
         {
           "icon": "./assets/images/icon.png",
           "color": "#154bba",
-          "sounds": ["./assets/sounds/alert.mp3"],
+          "sounds": [
+            "./assets/sounds/alert.mp3"
+          ],
           "androidMode": "default",
           "androidCollapsedTitle": "CampusAlert"
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-web-browser"
     ],
     "experiments": {
       "reactCompiler": true
