@@ -35,15 +35,15 @@
 import { isAxiosError } from "axios";
 import React, { useCallback, useState } from "react";
 import {
-    ActivityIndicator,
-    KeyboardAvoidingView,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -163,13 +163,40 @@ export const LoginScreen: React.FC = () => {
               "• The CampusAlert server is running",
           );
         } else if (status === 400) {
-          // EmailLoginSerializer returns 400 for wrong email/password.
-          // The error comes back as { non_field_errors: ["..."] } or { detail: "..." }
-          const detail =
-            (err.response.data as Record<string, string[]>)
-              ?.non_field_errors?.[0] ??
-            (err.response.data as { detail?: string })?.detail ??
-            "Invalid email or password.";
+          // TypeScript 'as' casts don't protect at runtime. DRF's custom
+          // exception handlers can reshape non_field_errors in unexpected ways.
+          // We defensively extract and always guarantee a string reaches setErrorMessage.
+          const data = err.response.data as Record<string, unknown>;
+
+          // DRF serializer errors: { non_field_errors: ["message"] }
+          // Some custom handlers wrap ErrorDetail as objects, not strings.
+          const nfeRaw = data?.non_field_errors;
+          const firstNfe = Array.isArray(nfeRaw) ? nfeRaw[0] : undefined;
+
+          // Convert to string regardless of what DRF/custom handler returned.
+          // String() on a DRF ErrorDetail string subclass returns the string value.
+          // String() on an ErrorDetail object returns "[object Object]" — so we
+          // check for .string or .message fields first before falling back.
+          let detail = "Invalid email or password.";
+
+          if (firstNfe !== undefined && firstNfe !== null) {
+            if (typeof firstNfe === "string") {
+              detail = firstNfe;
+            } else if (
+              typeof firstNfe === "object" &&
+              typeof (firstNfe as Record<string, unknown>).string === "string"
+            ) {
+              detail = (firstNfe as Record<string, unknown>).string as string;
+            } else if (
+              typeof firstNfe === "object" &&
+              typeof (firstNfe as Record<string, unknown>).message === "string"
+            ) {
+              detail = (firstNfe as Record<string, unknown>).message as string;
+            }
+          } else if (typeof data?.detail === "string") {
+            detail = data.detail;
+          }
+
           setErrorMessage(detail);
         } else if (status === 401) {
           setErrorMessage("Invalid email or password.");
