@@ -14,11 +14,11 @@ import type { AlertUrgency } from "@models/Alert";
 import { URGENCY_CONFIG } from "@utils/urgencyConfig";
 import React from "react";
 import {
-    ScrollView,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 
 type FilterValue = AlertUrgency | null;

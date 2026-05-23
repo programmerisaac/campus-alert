@@ -1,67 +1,102 @@
 // src/utils/urgencyConfig.ts
 /**
- * Per-urgency visual configuration — colour, icon name, label, and display behaviour.
+ * Visual configuration for each alert urgency level.
  *
- * Centralising these here means changing a colour or label is a one-line edit
- * and every component that renders urgency stays consistent automatically.
+ * Single source of truth — all components (badge, card, modal, filter chips)
+ * read from this so colours and icons are always consistent.
+ *
+ * Urgency levels (set by the Django ML pipeline):
+ *   critical — life-safety emergencies. Red. Full-screen takeover. Vibrates.
+ *   high     — serious incidents requiring immediate attention. Amber.
+ *   medium   — important notices that can wait a moment. Blue.
+ *   low      — general information. Green.
  */
 
 import type { AlertUrgency } from "@models/Alert";
 
 export interface UrgencyConfig {
-  /** Display label shown in badges and headers. */
+  /** Human-readable label shown in badges and chips. */
   label: string;
-  /** Tailwind-style hex colour used as the badge background. */
-  colour: string;
-  /** Lighter tint used for card backgrounds and row highlights. */
-  tintColour: string;
-  /** Text colour that maintains contrast on the badge background. */
-  textColour: string;
-  /** Emoji or character shown alongside the urgency label. */
+
+  /** Emoji icon used in badges, chips, and modal headers. */
   icon: string;
-  /** Whether this urgency level triggers the full-screen takeover. */
-  isFullScreen: boolean;
+
+  /** Primary accent colour — badge background, card left border, modal accent. */
+  colour: string;
+
+  /** Text colour on top of `colour` background (always white for accessibility). */
+  textColour: string;
+
+  /** Slightly darker border colour for card outlines. */
+  borderColour: string;
+
+  /** Full-screen modal background — dark, saturated version of the urgency colour. */
+  modalBg: string;
+
+  /** Body text colour on the modal background. */
+  modalText: string;
+
+  /**
+   * Whether arriving alerts at this urgency should trigger the full-screen
+   * modal takeover. Critical and High do. Medium and Low do not.
+   */
+  triggersFullScreen: boolean;
+
+  /**
+   * Vibration pattern for physical haptic feedback on arrival.
+   * Format: [pause, vibrate, pause, vibrate, ...]
+   * Empty array = no vibration.
+   */
+  vibrationPattern: number[];
 }
 
 export const URGENCY_CONFIG: Record<AlertUrgency, UrgencyConfig> = {
   critical: {
-    label: "CRITICAL",
-    colour: "#DC2626", // Red-600
-    tintColour: "#FEE2E2", // Red-100
-    textColour: "#FFFFFF",
+    label: "Critical",
     icon: "🚨",
-    isFullScreen: true,
+    colour: "#DC2626",
+    textColour: "#FFFFFF",
+    borderColour: "#B91C1C",
+    modalBg: "#450A0A",
+    modalText: "#FEE2E2",
+    triggersFullScreen: true,
+    vibrationPattern: [0, 500, 200, 500, 200, 500], // three strong pulses
   },
   high: {
-    label: "HIGH",
-    colour: "#EA580C", // Orange-600
-    tintColour: "#FFEDD5", // Orange-100
-    textColour: "#FFFFFF",
+    label: "High",
     icon: "⚠️",
-    isFullScreen: true,
+    colour: "#D97706",
+    textColour: "#FFFFFF",
+    borderColour: "#B45309",
+    modalBg: "#451A03",
+    modalText: "#FEF3C7",
+    triggersFullScreen: true,
+    vibrationPattern: [0, 400, 200, 400], // two pulses
   },
   medium: {
-    label: "MEDIUM",
-    colour: "#D97706", // Amber-600
-    tintColour: "#FEF3C7", // Amber-100
-    textColour: "#FFFFFF",
+    label: "Medium",
     icon: "📢",
-    isFullScreen: false,
+    colour: "#2563EB",
+    textColour: "#FFFFFF",
+    borderColour: "#1D4ED8",
+    modalBg: "#1E3A8A",
+    modalText: "#DBEAFE",
+    triggersFullScreen: false,
+    vibrationPattern: [0, 200], // single short pulse
   },
   low: {
-    label: "LOW",
-    colour: "#2563EB", // Blue-600 (brand primary)
-    tintColour: "#DBEAFE", // Blue-100
-    textColour: "#FFFFFF",
+    label: "Low",
     icon: "ℹ️",
-    isFullScreen: false,
+    colour: "#16A34A",
+    textColour: "#FFFFFF",
+    borderColour: "#15803D",
+    modalBg: "#052E16",
+    modalText: "#DCFCE7",
+    triggersFullScreen: false,
+    vibrationPattern: [],
   },
 };
 
-/**
- * Returns the config object for a given urgency level.
- * Falls back to LOW config if an unexpected value arrives from the API.
- */
 export function getUrgencyConfig(urgency: AlertUrgency): UrgencyConfig {
   return URGENCY_CONFIG[urgency] ?? URGENCY_CONFIG.low;
 }

@@ -1,221 +1,262 @@
 // src/features/alerts/screens/FullScreenAlertScreen.tsx
 /**
- * Full-Screen Alert Takeover (Features F-05).
+ * Full-screen alert takeover screen.
  *
- * Triggered automatically when a Critical or High urgency alert arrives.
- * Takes over the entire screen and CANNOT be dismissed without tapping
- * "Acknowledge" — the back button is disabled via usePreventRemove.
+ * Two entry points:
+ *  1. Automatic — StudentNavigator shows this via a Modal when a Critical/High
+ *     alert arrives via WebSocket (pendingFullScreenAlert in alertStore).
+ *  2. Manual    — Student taps a Critical/High alert card in the feed
+ *     → navigates here with { alert } route params.
  *
  * Visual design:
- *   - Background matches urgency colour (red for Critical, orange for High)
- *   - Pulsing urgency icon animation
- *   - Alert title and body
- *   - "Acknowledge" button that calls the backend before releasing the screen
+ *   Background, header, and button colours are all driven by urgency level.
+ *   Critical = deep red. High = deep amber. Consistent with urgencyConfig.ts.
+ *
+ * Props (from React Navigation route params):
+ *   alert — the Alert object to display
+ *   onAcknowledge — optional callback for the modal use case
+ *                   (navigation use case calls alertRepository directly)
  */
 
+import { alertRepository } from "@features/alerts/alertRepository";
+import type { Alert } from "@models/Alert";
+import type { StudentStackParamList } from "@navigation/StudentNavigator";
+import { NavigationProp, useNavigation } from "@react-navigation/native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
-import React, { useCallback, useEffect, useRef } from "react";
+import { getUrgencyConfig } from "@utils/urgencyConfig";
+import React, { useEffect } from "react";
 import {
-    Animated,
-    BackHandler,
     ScrollView,
     StatusBar,
     StyleSheet,
     Text,
     TouchableOpacity,
+    Vibration,
     View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import type { StudentStackParamList } from "@navigation/StudentNavigator";
-import { getUrgencyConfig } from "@utils/urgencyConfig";
-import { alertRepository } from "../alertRepository";
+interface FullScreenAlertScreenProps {
+  /**
+   * When used as a navigation screen, the alert comes from route.params.
+   * When used inside the StudentNavigator Modal, it comes from props directly.
+   */
+  alert: Alert;
+  /**
+   * Optional override for the acknowledge action.
+   * Navigation screen: not provided — uses alertRepository.acknowledgeAlert().
+   * Modal: provided — caller handles dismiss.
+   */
+  onAcknowledge?: () => void;
+}
 
-type Props = NativeStackScreenProps<StudentStackParamList, "FullScreenAlert">;
-
-export const FullScreenAlertScreen: React.FC<Props> = ({
-  navigation,
-  route,
+export const FullScreenAlertScreen: React.FC<FullScreenAlertScreenProps> = ({
+  alert,
+  onAcknowledge,
 }) => {
   const insets = useSafeAreaInsets();
-  const { alert } = route.params;
   const config = getUrgencyConfig(alert.urgency);
 
-  // ── Pulsing animation for the urgency icon ─────────────────────────────────
-  const pulseAnim = useRef(new Animated.Value(1)).current;
+  // ✅ Fix: Call the hook unconditionally at top level and provide explicit stack parameters
+  const navigation = useNavigation<NavigationProp<StudentStackParamList>>();
 
+  // Haptic feedback on mount — tells the user something urgent arrived
   useEffect(() => {
-    const pulse = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, {
-          toValue: 1.3,
-          duration: 600,
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulseAnim, {
-          toValue: 1,
-          duration: 600,
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-    pulse.start();
-    return () => pulse.stop();
-  }, [pulseAnim]);
+    if (config.vibrationPattern.length > 0) {
+      Vibration.vibrate(config.vibrationPattern);
+    }
+  }, [config.vibrationPattern]);
 
-  // ── Block hardware back button on Android ──────────────────────────────────
-  useEffect(() => {
-    const backHandler = BackHandler.addEventListener(
-      "hardwareBackPress",
-      () => true, // returning true prevents default back behaviour
-    );
-    return () => backHandler.remove();
-  }, []);
+  const handleAcknowledge = async () => {
+    if (onAcknowledge) {
+      // Modal mode — parent handles dismiss and store update
+      onAcknowledge();
+    } else {
+      // Navigation mode — call repository and go back
+      await alertRepository.acknowledgeAlert(alert.id, "lan_websocket");
 
-  // ── Prevent swipe-back gesture on iOS ─────────────────────────────────────
-  useEffect(() => {
-    navigation.setOptions({ gestureEnabled: false });
-  }, [navigation]);
+      // ✅ Safely try calling goBack if available on the navigation tree
+      if (navigation && typeof navigation.goBack === "function") {
+        navigation.goBack();
+      }
+    }
+  };
 
-  // ── Acknowledge handler ────────────────────────────────────────────────────
-  const handleAcknowledge = useCallback(async () => {
-    // Determine which channel delivered this alert.
-    // delivery_channel is set client-side when the alert arrives.
-    const channel = alert.delivery_channel ?? "fcm";
+  const formattedTime = new Date(alert.created_at).toLocaleTimeString("en-NG", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
-    await alertRepository.acknowledgeAlert(alert.id, channel);
-
-    // Navigate back to the feed — acknowledgement clears pendingFullScreenAlert
-    // in the store, which removes the trigger for this screen.
-    navigation.goBack();
-  }, [alert, navigation]);
+  const formattedDate = new Date(alert.created_at).toLocaleDateString("en-NG", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
 
   return (
-    <View
-      style={[
-        styles.container,
-        { backgroundColor: config.colour },
-        { paddingTop: insets.top, paddingBottom: insets.bottom },
-      ]}
-    >
-      <StatusBar
-        barStyle="light-content"
-        backgroundColor={config.colour}
-        translucent={false}
-      />
+    <View style={[styles.root, { backgroundColor: config.modalBg }]}>
+      {/* Make the status bar text white to contrast against the dark modal bg */}
+      <StatusBar barStyle="light-content" backgroundColor={config.modalBg} />
 
-      <ScrollView contentContainerStyle={styles.scrollContent} bounces={false}>
-        {/* Pulsing icon */}
-        <Animated.Text
-          style={[styles.icon, { transform: [{ scale: pulseAnim }] }]}
-        >
-          {config.icon}
-        </Animated.Text>
-
-        {/* Urgency label */}
-        <View style={styles.urgencyLabel}>
-          <Text style={styles.urgencyText}>{config.label} ALERT</Text>
-        </View>
-
-        {/* Title */}
-        <Text style={styles.title}>{alert.title}</Text>
-
-        {/* Body */}
-        <Text style={styles.body}>{alert.body}</Text>
-
-        {/* Sender info */}
-        <Text style={styles.sender}>
-          Sent by {alert.created_by.first_name} {alert.created_by.last_name}
+      {/* ── Header ──────────────────────────────────────────────────────────── */}
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: insets.top + 16,
+            backgroundColor: config.colour,
+          },
+        ]}
+      >
+        <Text style={styles.headerIcon}>{config.icon}</Text>
+        <Text style={styles.headerUrgency}>{config.label.toUpperCase()}</Text>
+        <Text style={styles.headerTime}>
+          {formattedDate} · {formattedTime}
         </Text>
+      </View>
+
+      {/* ── Body ────────────────────────────────────────────────────────────── */}
+      <ScrollView
+        style={styles.scrollArea}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <Text style={[styles.title, { color: config.modalText }]}>
+          {alert.title}
+        </Text>
+
+        <View
+          style={[
+            styles.divider,
+            { backgroundColor: config.colour, opacity: 0.4 },
+          ]}
+        />
+
+        <Text style={[styles.body, { color: config.modalText }]}>
+          {alert.body}
+        </Text>
+
+        {/* Metadata row */}
+        <View style={styles.metaRow}>
+          <Text
+            style={[styles.metaText, { color: config.modalText, opacity: 0.6 }]}
+          >
+            From: {alert.created_by.first_name} {alert.created_by.last_name}
+          </Text>
+          <Text
+            style={[styles.metaText, { color: config.modalText, opacity: 0.6 }]}
+          >
+            Category: {alert.category}
+          </Text>
+        </View>
       </ScrollView>
 
-      {/* Acknowledge button — fixed at bottom, always visible */}
-      <View style={styles.footer}>
+      {/* ── Acknowledge button ───────────────────────────────────────────────── */}
+      <View style={[styles.footer, { paddingBottom: insets.bottom + 16 }]}>
         <TouchableOpacity
-          style={styles.acknowledgeButton}
+          style={[styles.ackButton, { backgroundColor: config.colour }]}
           onPress={handleAcknowledge}
           activeOpacity={0.85}
+          accessibilityLabel="Acknowledge this alert"
+          accessibilityRole="button"
         >
-          <Text style={[styles.acknowledgeText, { color: config.colour }]}>
-            ✓ Acknowledge
-          </Text>
+          <Text style={styles.ackButtonText}>✓ Acknowledge</Text>
         </TouchableOpacity>
-        <Text style={styles.footerHint}>
-          You must acknowledge this alert to dismiss it.
+
+        {/* Safety info footer */}
+        <Text
+          style={[styles.footerNote, { color: config.modalText, opacity: 0.5 }]}
+        >
+          Tap acknowledge to confirm you have seen this alert.
         </Text>
       </View>
     </View>
   );
 };
 
+// ─── Navigation screen wrapper ─────────────────────────────────────────────────
+type NavigationScreenProps = NativeStackScreenProps<
+  StudentStackParamList,
+  "FullScreenAlert"
+>;
+
+export const FullScreenAlertNavigationScreen: React.FC<
+  NavigationScreenProps
+> = ({ route }) => {
+  return <FullScreenAlertScreen alert={route.params.alert} />;
+};
+
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  scrollContent: {
+  root: {
     flex: 1,
+  },
+  header: {
+    paddingHorizontal: 24,
+    paddingBottom: 24,
     alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 32,
-    paddingTop: 40,
-    paddingBottom: 20,
   },
-  icon: { fontSize: 72, marginBottom: 20 },
-  urgencyLabel: {
-    backgroundColor: "rgba(255,255,255,0.2)",
-    paddingHorizontal: 20,
-    paddingVertical: 8,
-    borderRadius: 20,
-    marginBottom: 24,
+  headerIcon: {
+    fontSize: 56,
+    marginBottom: 8,
   },
-  urgencyText: {
+  headerUrgency: {
     color: "#FFFFFF",
-    fontSize: 16,
+    fontSize: 13,
     fontWeight: "800",
-    letterSpacing: 2,
+    letterSpacing: 3,
+    marginBottom: 4,
+  },
+  headerTime: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    opacity: 0.85,
+  },
+  scrollArea: {
+    flex: 1,
+  },
+  scrollContent: {
+    padding: 24,
+    paddingTop: 28,
   },
   title: {
     fontSize: 26,
     fontWeight: "800",
-    color: "#FFFFFF",
-    textAlign: "center",
-    marginBottom: 20,
     lineHeight: 34,
+    marginBottom: 16,
+  },
+  divider: {
+    height: 1,
+    marginBottom: 16,
   },
   body: {
     fontSize: 17,
-    color: "rgba(255,255,255,0.9)",
-    textAlign: "center",
-    lineHeight: 26,
-    marginBottom: 32,
+    lineHeight: 28,
+    marginBottom: 24,
   },
-  sender: {
+  metaRow: {
+    gap: 6,
+  },
+  metaText: {
     fontSize: 13,
-    color: "rgba(255,255,255,0.7)",
-    marginBottom: 40,
   },
   footer: {
     paddingHorizontal: 24,
-    paddingBottom: 8,
-    alignItems: "center",
+    paddingTop: 16,
+    gap: 10,
   },
-  acknowledgeButton: {
-    backgroundColor: "#FFFFFF",
-    paddingVertical: 16,
-    paddingHorizontal: 48,
+  ackButton: {
     borderRadius: 14,
-    marginBottom: 10,
-    width: "100%",
+    paddingVertical: 18,
     alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 4,
   },
-  acknowledgeText: { fontSize: 18, fontWeight: "800" },
-  footerHint: {
-    fontSize: 12,
-    color: "rgba(255,255,255,0.6)",
+  ackButtonText: {
+    color: "#FFFFFF",
+    fontSize: 17,
+    fontWeight: "800",
+    letterSpacing: 0.3,
+  },
+  footerNote: {
     textAlign: "center",
-    marginBottom: 8,
+    fontSize: 12,
   },
 });
