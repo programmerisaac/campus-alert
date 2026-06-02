@@ -26,13 +26,13 @@ import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { getUrgencyConfig } from "@utils/urgencyConfig";
 import React, { useEffect } from "react";
 import {
-    ScrollView,
-    StatusBar,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    Vibration,
-    View,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  Vibration,
+  View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 

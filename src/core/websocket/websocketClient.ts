@@ -117,16 +117,20 @@ class WebSocketClient {
     try {
       const msg = JSON.parse(raw) as Record<string, unknown>;
 
-      if (msg.type === "new_alert" && msg.alert) {
-        this.callback?.(msg.alert as Alert);
+      if (msg.type === "new_alert") {
+        // The backend sends: { type: "new_alert", id: "...", title: "...", ... }
+        // The Alert fields are at the top level — NOT nested under msg.alert.
+        // Strip `type` and pass the rest directly to the callback.
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { type, ...alertData } = msg;
+        this.callback?.(alertData as unknown as Alert);
       }
-      // heartbeat messages are intentionally ignored — they just keep the
-      // connection alive through NAT/proxy idle timeouts
+      // heartbeat messages are intentionally ignored — they keep the connection
+      // alive through NAT/proxy idle timeouts
     } catch {
       console.warn("[wsClient] Could not parse message:", raw);
     }
   }
-
   /**
    * Schedules a reconnect attempt with exponential backoff.
    * Delays: 2s, 4s, 8s, 16s … capped at 30s.

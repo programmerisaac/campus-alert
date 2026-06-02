@@ -82,19 +82,6 @@ export const AlertFeedScreen: React.FC<Props> = ({ navigation }) => {
     };
   }, []);
 
-  // ── Navigate to full-screen when a Critical/High alert arrives ─────────────
-  //
-  // pendingFullScreenAlert is set by alertStore.prependAlert() when urgency is
-  // critical or high. We navigate here rather than in the store action so that
-  // navigation only happens when this screen is mounted and active.
-  useEffect(() => {
-    if (pendingFullScreenAlert) {
-      navigation.navigate("FullScreenAlert", {
-        alert: pendingFullScreenAlert,
-      });
-    }
-  }, [pendingFullScreenAlert, navigation]);
-
   // ── FCM notification tap handler ───────────────────────────────────────────
   //
   // FIX: Expo's notification data arrives as { [key: string]: unknown }.

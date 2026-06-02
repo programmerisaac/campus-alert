@@ -30,6 +30,9 @@ export interface UrgencyConfig {
   /** Slightly darker border colour for card outlines. */
   borderColour: string;
 
+  /** Tint colour for subtle UI elements. */
+  tintColour: string;
+
   /** Full-screen modal background — dark, saturated version of the urgency colour. */
   modalBg: string;
 
@@ -57,6 +60,7 @@ export const URGENCY_CONFIG: Record<AlertUrgency, UrgencyConfig> = {
     colour: "#DC2626",
     textColour: "#FFFFFF",
     borderColour: "#B91C1C",
+    tintColour: "#FECACA",
     modalBg: "#450A0A",
     modalText: "#FEE2E2",
     triggersFullScreen: true,
@@ -68,6 +72,7 @@ export const URGENCY_CONFIG: Record<AlertUrgency, UrgencyConfig> = {
     colour: "#D97706",
     textColour: "#FFFFFF",
     borderColour: "#B45309",
+    tintColour: "#FDE68A",
     modalBg: "#451A03",
     modalText: "#FEF3C7",
     triggersFullScreen: true,
@@ -79,6 +84,7 @@ export const URGENCY_CONFIG: Record<AlertUrgency, UrgencyConfig> = {
     colour: "#2563EB",
     textColour: "#FFFFFF",
     borderColour: "#1D4ED8",
+    tintColour: "#BFDBFE",
     modalBg: "#1E3A8A",
     modalText: "#DBEAFE",
     triggersFullScreen: false,
@@ -90,6 +96,7 @@ export const URGENCY_CONFIG: Record<AlertUrgency, UrgencyConfig> = {
     colour: "#16A34A",
     textColour: "#FFFFFF",
     borderColour: "#15803D",
+    tintColour: "#DCFCE7",
     modalBg: "#052E16",
     modalText: "#DCFCE7",
     triggersFullScreen: false,
