@@ -40,6 +40,7 @@ import {
 import { wsClient } from "@core/websocket/websocketClient";
 import type { AcknowledgePayload, Alert, PaginatedAlerts } from "@models/Alert";
 import { connectivityService } from "@services/connectivityService";
+import { showAlertNotification } from "@services/localNotificationService";
 import { syncMissedAlerts } from "@services/syncService";
 import { useAlertStore } from "@store/alertStore";
 
@@ -229,15 +230,19 @@ class AlertRepository {
    *
    * @param alert - The full Alert object as sent by Django's AlertSerializer
    */
+
   private async _onWebSocketAlert(alert: Alert): Promise<void> {
-    // Tag the alert so the detail screen can show the delivery channel
     const taggedAlert: Alert = { ...alert, delivery_channel: "lan_websocket" };
 
-    // Persist to SQLite so the alert survives an app restart or network loss
+    // 1. Persist to SQLite
     await upsertAlert(taggedAlert);
 
-    // Add to the live feed — alertStore.prependAlert() also sets
-    // pendingFullScreenAlert if urgency is critical or high
+    // 2. Fire urgency-appropriate local notification (sound + tray entry)
+    //    Works in Expo Go — only remote FCM push was removed in SDK 53.
+    //    Also fires when the app is backgrounded (WebSocket still alive).
+    await showAlertNotification(taggedAlert);
+
+    // 3. Update in-memory store (triggers modal for critical/high)
     useAlertStore.getState().prependAlert(taggedAlert);
   }
 }

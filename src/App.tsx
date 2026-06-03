@@ -20,6 +20,7 @@
  *   npx expo run:android   (or eas build --profile development --platform android)
  */
 
+import { setupNotificationChannels } from "@services/localNotificationService";
 import Constants from "expo-constants";
 import * as Notifications from "expo-notifications";
 import React, { useEffect } from "react";
@@ -77,6 +78,9 @@ export default function App(): React.ReactElement {
     const startup = async () => {
       // 1. Ensure local SQLite tables exist before anything reads from them.
       await initDb();
+
+      // Set up 4 urgency-based notification channels (works in Expo Go)
+      await setupNotificationChannels();
 
       // 2. Attempt FCM initialisation — skipped in Expo Go to prevent crash.
       let fcmToken: string | null = null;
