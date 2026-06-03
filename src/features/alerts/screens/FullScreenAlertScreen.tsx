@@ -141,7 +141,8 @@ export const FullScreenAlertScreen: React.FC<FullScreenAlertScreenProps> = ({
           <Text
             style={[styles.metaText, { color: config.modalText, opacity: 0.6 }]}
           >
-            From: {alert.created_by.first_name} {alert.created_by.last_name}
+            From: {alert.created_by?.first_name ?? "Campus"}{" "}
+            {alert.created_by?.last_name ?? "Admin"}
           </Text>
           <Text
             style={[styles.metaText, { color: config.modalText, opacity: 0.6 }]}

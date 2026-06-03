@@ -50,19 +50,21 @@ export interface Alert {
 
 /**
  * Per-user delivery log record for a single alert.
- * Returned by GET /api/v1/alerts/<id>/delivery-status/
+ * Returned inside AlertDeliveryStatus from GET /api/v1/alerts/<id>/delivery-status/
+ *
+ * NOTE: The backend serializer returns flat user fields (user_display_name,
+ * user_email, user_role) — NOT a nested user object. This interface mirrors
+ * the actual API response shape.
  */
 export interface DeliveryLogEntry {
   id: string;
-  user: {
-    id: string;
-    username: string;
-    first_name: string;
-    last_name: string;
-  };
+  user_display_name: string; // e.g. "Isaac Ade"
+  user_email: string;
+  user_role: string;
   channel: DeliveryChannel;
   delivered_at: string | null;
   acknowledged_at: string | null;
+  is_acknowledged: boolean; // computed by backend: acknowledged_at !== null
   fcm_message_id: string;
   created_at: string;
 }

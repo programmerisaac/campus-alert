@@ -10,11 +10,11 @@
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import React, { useEffect, useState } from "react";
 import {
-    ActivityIndicator,
-    ScrollView,
-    StyleSheet,
-    Text,
-    View,
+  ActivityIndicator,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -100,7 +100,8 @@ export const AlertDetailScreen: React.FC<Props> = ({ route }) => {
         </Text>
         <Text style={styles.metaDot}>·</Text>
         <Text style={styles.metaText}>
-          By {alert.created_by.first_name} {alert.created_by.last_name}
+          By {alert.created_by?.first_name ?? ""}{" "}
+          {alert.created_by?.last_name ?? ""}
         </Text>
       </View>
 

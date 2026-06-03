@@ -9,11 +9,11 @@
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import React, { useEffect, useState } from "react";
 import {
-    ActivityIndicator,
-    ScrollView,
-    StyleSheet,
-    Text,
-    View,
+  ActivityIndicator,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -157,15 +157,17 @@ export const DeliveryStatusScreen: React.FC<Props> = ({ route }) => {
           </Text>
           {status.delivery_logs.map((log) => (
             <View key={log.id} style={styles.logRow}>
-              <Text style={styles.logUser}>
-                {log.user.first_name} {log.user.last_name}
-              </Text>
+              <View style={styles.logUserInfo}>
+                <Text style={styles.logUser}>{log.user_display_name}</Text>
+                <Text style={styles.logEmail}>{log.user_email}</Text>
+              </View>
               <Text style={styles.logChannel}>
-                {CHANNEL_META[log.channel]?.icon ?? "?"}{" "}
-                {CHANNEL_META[log.channel]?.label ?? log.channel}
+                {CHANNEL_META[log.channel as DeliveryChannel]?.icon ?? "?"}{" "}
+                {CHANNEL_META[log.channel as DeliveryChannel]?.label ??
+                  log.channel}
               </Text>
               <Text style={styles.logAck}>
-                {log.acknowledged_at ? "✅ Acknowledged" : "⏳ Pending"}
+                {log.is_acknowledged ? "✅ Ack'd" : "⏳ Pending"}
               </Text>
             </View>
           ))}
@@ -251,7 +253,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
   },
-  logUser: { flex: 1, fontSize: 14, fontWeight: "600", color: "#111827" },
+  logUserInfo: { flex: 1 },
+  logEmail: { fontSize: 11, color: "#9CA3AF", marginTop: 1 },
+  logUser: { fontSize: 14, fontWeight: "600", color: "#111827" },
   logChannel: { fontSize: 12, color: "#6B7280" },
   logAck: { fontSize: 12, color: "#374151" },
   errorText: {

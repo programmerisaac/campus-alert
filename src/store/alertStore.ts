@@ -21,8 +21,9 @@ interface AlertState {
 
   /**
    * An alert that should trigger the full-screen takeover UI.
-   * Set by prepend when urgency is critical or high.
+   * Set by prependAlert when urgency is critical or high.
    * Cleared by dismissFullScreenAlert once the user acknowledges.
+   * Can also be set directly by setFullScreenAlert (notification tap path).
    */
   pendingFullScreenAlert: Alert | null;
 
@@ -31,13 +32,18 @@ interface AlertState {
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
-  /** Replaces the entire feed (e.g. after a fresh API load). */
+  /**
+   * Replaces the entire feed (e.g. after a fresh API load or pull-to-refresh).
+   * Deduplicates by ID so WebSocket-prepended alerts (full created_by object)
+   * are not replaced by REST-fetched duplicates.
+   */
   setAlerts: (alerts: Alert[]) => void;
 
   /**
    * Prepends a newly arrived alert to the feed list.
-   * Also increments unread count and sets pendingFullScreenAlert for
+   * Increments unread count and sets pendingFullScreenAlert for
    * Critical/High urgency levels.
+   * No-op if the alert ID already exists in the list (FCM + WS race guard).
    */
   prependAlert: (alert: Alert) => void;
 
@@ -46,6 +52,14 @@ interface AlertState {
 
   /** Clears the pending full-screen alert after the user dismisses it. */
   dismissFullScreenAlert: () => void;
+
+  /**
+   * Directly sets (or clears) the pending full-screen alert.
+   * Used by the notification tap handler in AlertFeedScreen so that tapping
+   * a Critical/High notification opens the modal even when the alert is not
+   * yet in the feed list.
+   */
+  setFullScreenAlert: (alert: Alert | null) => void;
 
   setLoading: (loading: boolean) => void;
 
@@ -60,20 +74,29 @@ export const useAlertStore = create<AlertState>((set) => ({
   isLoading: false,
 
   setAlerts: (alerts) => {
-    const unread = alerts.filter((a) => !a.acknowledged).length;
-    set({ alerts, unreadCount: unread });
+    // Deduplicate by ID — keeps the FIRST occurrence so WebSocket-prepended
+    // alerts (which carry the full created_by nested object) are not
+    // overwritten by a REST-fetched copy of the same alert.
+    const seen = new Set<string>();
+    const deduped = alerts.filter((a) => {
+      if (seen.has(a.id)) return false;
+      seen.add(a.id);
+      return true;
+    });
+    const unread = deduped.filter((a) => !a.acknowledged).length;
+    set({ alerts: deduped, unreadCount: unread });
   },
 
   prependAlert: (alert) => {
     set((state) => {
-      // Avoid duplicates if the same alert arrives via both FCM and WebSocket.
+      // Avoid duplicates if the same alert arrives via both FCM and WebSocket
       const isDuplicate = state.alerts.some((a) => a.id === alert.id);
       if (isDuplicate) return state;
 
       const newAlerts = [alert, ...state.alerts];
       const newUnread = state.unreadCount + (alert.acknowledged ? 0 : 1);
 
-      // Trigger full-screen takeover for Critical and High alerts.
+      // Trigger full-screen takeover for Critical and High alerts
       const isPendingFullScreen =
         (alert.urgency === "critical" || alert.urgency === "high") &&
         !alert.acknowledged;
@@ -98,6 +121,8 @@ export const useAlertStore = create<AlertState>((set) => ({
   },
 
   dismissFullScreenAlert: () => set({ pendingFullScreenAlert: null }),
+
+  setFullScreenAlert: (alert) => set({ pendingFullScreenAlert: alert }),
 
   setLoading: (isLoading) => set({ isLoading }),
 
